@@ -26,4 +26,4 @@ Selamat datang di repositori resmi **Eugen | Sailor Piece**, asisten taktis ting
 Salin dan tempel kode berikut ke dalam executor favoritmu (seperti Delta, Wave, atau lainnya):
 
 ```lua
-loadstring(game:HttpGet('[https://raw.githubusercontent.com/Footagesus/WindUI/refs/heads/main/main.client.lua](https://raw.githubusercontent.com/Footagesus/WindUI/refs/heads/main/main.client.lua)'))()
+loadstring(game:HttpGet('https://raw.githubusercontent.com/PrinzXz/Roblox-Script/refs/heads/main/sailor-piece.lua'))()
