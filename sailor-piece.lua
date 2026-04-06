@@ -35,9 +35,46 @@ _G.AutoHit = false
 _G.SelectedSkills = {}
 _G.AutoSkillActive = false
 _G.AutoTween = false
-_G.TweenSpeedValue = 300
+_G.TweenSpeedValue = 150
 _G.TweenDistanceValue = 5
 _G.IsTweeningBoss = false -- To prevent overlapping moves
+_G.AutoHuntTimed = false
+_G.TargetTimedBosses = {} -- Selected world bosses
+_G.TimedBossesData = {} -- Raw data from server
+
+_G.TimedBossConfig = {
+    ["GojoBoss"] = "Limitless Sorcerer",
+    ["SukunaBoss"] = "Cursed King",
+    ["AizenBoss"] = "Manipulator",
+    ["JinwooBoss"] = "Solo Hunter",
+    ["AlucardBoss"] = "Vampire King",
+    ["YujiBoss"] = "Cursed Vessel",
+    ["YamatoBoss"] = "Yamato",
+    ["StrongestShinobiBoss"] = "Strongest Shinobi"
+}
+
+-- */ ISLAND DATABASE */ --
+_G.IslandCoordinates = {
+    ["SailorIsland"] = Vector3.new(185, 1, 665),
+    ["HollowIsland"] = Vector3.new(-538, 0, 1071),
+    ["ShibuyaStation"] = Vector3.new(1500, 50, 150),
+    ["JudgementIsland"] = Vector3.new(-1320, 76, -1202),
+    ["NinjaIsland"] = Vector3.new(-1912, 22, -607),
+}
+
+-- Map BossID to their Internal Portal Name
+_G.BossIslandMap = {
+    ["GojoBoss"] = "ShibuyaStation",
+    ["SukunaBoss"] = "ShibuyaStation",
+    ["AizenBoss"] = "HollowIsland",
+    ["JinwooBoss"] = "SailorIsland",
+    ["AlucardBoss"] = "SailorIsland",
+    ["YujiBoss"] = "ShibuyaStation",
+    ["YamatoBoss"] = "JudgementIsland",
+    ["StrongestShinobiBoss"] = "NinjaIsland"
+}
+
+
 
 
 -- */ Skill Mapping /* --
@@ -65,6 +102,210 @@ local BossConfigs = {
     }
 }
 
+-- */ GLOBAL MOVEMENT SYSTEM /* --
+local noclipConn = nil
+_G.ManageFollowSystem = function()
+    local RunService = game:GetService("RunService")
+    
+    if _G.AutoTween or _G.AutoHuntTimed then
+        -- 1. DYNAMIC NOCLIP (Only when hunting or moving)
+        if not noclipConn then
+            noclipConn = RunService.Stepped:Connect(function()
+                if not (_G.AutoTween or _G.AutoHuntTimed) then 
+                    if noclipConn then noclipConn:Disconnect(); noclipConn = nil end 
+                    return 
+                end
+                pcall(function()
+                    local char = LocalPlayer.Character
+                    -- Noclip only if active or near boss to avoid physics snags
+                    if char and _G.IsActiveHunting then
+                        for _, name in ipairs({"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso", "Head"}) do
+                            local p = char:FindFirstChild(name)
+                            if p and p:IsA("BasePart") then p.CanCollide = false end
+                        end
+                    end
+                end)
+            end)
+        end
+
+        -- 2. DYNAMIC MOVEMENT ENGINE (SMOOTH PID-LIKE)
+        local currentLoopId = tick()
+        _G.MovementLoopId = currentLoopId
+
+        local function findTargetInWorkspace(name)
+            for _, v in ipairs(workspace:GetChildren()) do
+                if v:IsA("Model") and (v.Name == name or string.find(v.Name, name)) and v:FindFirstChild("HumanoidRootPart") then return v end
+            end
+            for _, folder in ipairs({"NPCs", "Enemies", "SummonedBosses"}) do
+                local f = workspace:FindFirstChild(folder)
+                if f then
+                    for _, v in ipairs(f:GetChildren()) do
+                        if v:IsA("Model") and (v.Name == name or string.find(v.Name, name)) and v:FindFirstChild("HumanoidRootPart") then return v end
+                    end
+                end
+            end
+            return nil
+        end
+
+        task.spawn(function()
+            while (_G.AutoTween or _G.AutoHuntTimed) and _G.MovementLoopId == currentLoopId do
+                local dt = RunService.Heartbeat:Wait()
+                pcall(function()
+                    local Char = LocalPlayer.Character
+                    if not Char or not Char:FindFirstChild("HumanoidRootPart") then return end
+                    local myHRP = Char.HumanoidRootPart
+                    local hum = Char:FindFirstChildOfClass("Humanoid")
+                    
+                    local Boss = nil
+                    if _G.AutoHuntTimed then
+                        for bossId, dispName in pairs(_G.TimedBossConfig) do
+                            if table.find(_G.TargetTimedBosses, dispName) then
+                                Boss = findTargetInWorkspace(bossId) or findTargetInWorkspace(dispName)
+                                if Boss then break end
+                            end
+                        end
+                    end
+                    if not Boss and _G.AutoTween then
+                        Boss = findTargetInWorkspace(_G.SelectedBoss)
+                    end
+                    
+                    if Boss and Boss:FindFirstChild("HumanoidRootPart") then 
+                        _G.IsActiveHunting = true
+                        
+                        -- PHYSICS SETUP
+                        local bg = myHRP:FindFirstChild("AntiGravity") or Instance.new("BodyVelocity")
+                        bg.Name = "AntiGravity"
+                        bg.Parent = myHRP
+                        if hum then hum.PlatformStand = true end
+
+                        local bossHRP = Boss.HumanoidRootPart
+                        local targetCF = bossHRP.CFrame * CFrame.new(0, 0, _G.TweenDistanceValue)
+                        local dist = (myHRP.Position - targetCF.Position).Magnitude
+                        
+                        -- ROTATION: UPRIGHT
+                        myHRP.CFrame = CFrame.lookAt(myHRP.Position, Vector3.new(bossHRP.Position.X, myHRP.Position.Y, bossHRP.Position.Z))
+
+                        if dist > 3 then
+                            bg.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                            local baseS = _G.TweenSpeedValue
+                            local brakingZ = 30
+                            local adaptS = baseS
+                            if dist < brakingZ then adaptS = math.max(10, baseS * (dist / brakingZ)) end
+                            bg.Velocity = (targetCF.Position - myHRP.Position).Unit * adaptS
+                            if dist < 8 then myHRP.CFrame = myHRP.CFrame:Lerp(targetCF, 0.15) end
+                        else
+                            bg.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                            bg.Velocity = Vector3.new(0, 0, 0)
+                            myHRP.CFrame = targetCF
+                        end
+                    else
+                        -- [PULSE GLIDE NAVIGATOR - SMART TARGETING]
+                        if _G.AutoHuntTimed and _G.TimedBossesData then
+                            local closestId = nil
+                            local minJumpDist = math.huge
+                            
+                            -- FIND THE NEAREST SPAWNED BOSS (Prevents Island Ping-Pong)
+                            for bId, data in pairs(_G.TimedBossesData) do
+                                local disp = _G.TimedBossConfig[bId]
+                                if disp and table.find(_G.TargetTimedBosses, disp) and data.state == "SPAWNED" then
+                                    local iName = _G.BossIslandMap[bId]
+                                    local iPos = _G.IslandCoordinates[iName]
+                                    if iPos then
+                                        local d = (myHRP.Position - iPos).Magnitude
+                                        if d < minJumpDist then
+                                            minJumpDist = d
+                                            closestId = bId
+                                        end
+                                    end
+                                end
+                            end
+
+                            if closestId then
+                                local iName = _G.BossIslandMap[closestId]
+                                local iPos = _G.IslandCoordinates[iName]
+
+                                if iPos and iPos ~= Vector3.new(0,0,0) then
+                                    local iDist = (myHRP.Position - iPos).Magnitude
+                                    -- Only jump if not already on the boss's island
+                                    if iDist > 100 then
+                                        _G.IsActiveHunting = true
+                                        local bg = myHRP:FindFirstChild("AntiGravity") or Instance.new("BodyVelocity")
+                                        bg.Name = "AntiGravity"
+                                        bg.Parent = myHRP
+                                        bg.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                                        bg.Velocity = Vector3.new(0,0,0)
+                                        if hum then hum.PlatformStand = true end
+
+                                        WindUI:Notify({Title = "Pulse Glide", Content = "Dashing to " .. iName .. "...", Duration = 2})
+                                        
+                                        -- THE PULSE LOOP (DASH -> REST -> SAVE)
+                                        while (_G.AutoHuntTimed or _G.AutoTween) and (myHRP.Position - iPos).Magnitude > 30 do
+                                            local cPos = myHRP.Position
+                                            local dir = (iPos - cPos).Unit
+                                            
+                                            -- 1. THE PULSE (Move 24 studs total, 8 per step)
+                                            for step = 1, 3 do
+                                                myHRP.CFrame = myHRP.CFrame + (dir * 8)
+                                                task.wait(0.01)
+                                            end
+                                            
+                                            -- 2. THE SAVE (Hard-Sync position to server)
+                                            myHRP.Velocity = Vector3.new(0,0,0)
+                                            myHRP.Anchored = true
+                                            task.wait(0.05) -- Reduced rest for smoothness
+                                            myHRP.Anchored = false
+                                            
+                                            if not (_G.AutoHuntTimed or _G.AutoTween) then break end
+                                            if findTargetInWorkspace(closestId) or findTargetInWorkspace(_G.TimedBossConfig[closestId]) then break end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        -- STANDBY
+                        _G.IsActiveHunting = false
+                        if hum then hum.PlatformStand = false end
+                        local bg = myHRP:FindFirstChild("AntiGravity")
+                        if bg then bg:Destroy() end
+                    end
+                end)
+            end
+        end)
+    else
+        -- 3. TOTAL CLEANUP
+        _G.IsActiveHunting = false
+        if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
+        pcall(function()
+            local char = LocalPlayer.Character
+            if char then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    hrp.Anchored = false
+                    hrp.Velocity = Vector3.new(0, 0, 0)
+                    local bg = hrp:FindFirstChild("AntiGravity")
+                    if bg then bg:Destroy() end
+                end
+                if hum then 
+                    hum.PlatformStand = false
+                    hum:ChangeState(Enum.HumanoidStateType.Running)
+                end
+                for _, name in ipairs({"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso", "Head"}) do
+                    local p = char:FindFirstChild(name)
+                    if p and p:IsA("BasePart") then p.CanCollide = true end
+                end
+            end
+        end)
+    end
+end
+
+
+
+
+
+
+
 -- */ TAB 1: HOME (Dashboard) /* --
 -- Adding elements directly to HomeTab without a Section to avoid collapsible "Categories"
 local HomeTab = Window:Tab({ Title = "Home", Icon = "solar:home-2-bold" })
@@ -90,6 +331,22 @@ HomeTab:Button({
     Callback = function() 
         setclipboard(game.JobId) 
         WindUI:Notify({Title = "System", Content = "JobId copied to clipboard!"}) 
+    end
+})
+
+local GPSSection = HomeTab:Section({ Title = "GPS Tool" })
+
+GPSSection:Button({
+    Title = "Copy My Coordinates",
+    Desc = "Format: Vector3.new(x, y, z)",
+    Icon = "solar:map-point-bold",
+    Callback = function()
+        pcall(function()
+            local pos = LocalPlayer.Character.HumanoidRootPart.Position
+            local formatted = "Vector3.new(" .. math.floor(pos.X) .. ", " .. math.floor(pos.Y) .. ", " .. math.floor(pos.Z) .. ")"
+            setclipboard(formatted)
+            WindUI:Notify({Title = "GPS", Content = "Position copied: " .. formatted})
+        end)
     end
 })
 
@@ -196,7 +453,7 @@ SpawnerSection:Toggle({
 
 SpawnerSection:Slider({
     Title = "Tween Speed",
-    Value = { Min = 10, Max = 1000, Default = 10 },
+    Value = { Min = 10, Max = 350, Default = 150 },
     Callback = function(value) _G.TweenSpeedValue = value end,
 })
 
@@ -206,137 +463,46 @@ SpawnerSection:Slider({
     Callback = function(value) _G.TweenDistanceValue = value end,
 })
 
+-- */ TAB 4: TIMED BOSSES (WORLD BOSSES) /* --
+local TimedTab = Window:Tab({ Title = "Timed Bosses", Icon = "solar:alarm-bold" })
+local TimedSection = TimedTab:Section({ Title = "World Boss Targets" })
+
+local timedBossNames = _G.TimedBossConfig
+
+
+TimedSection:Dropdown({
+    Title = "Select Targets",
+    Multi = true,
+    Values = {"Limitless Sorcerer", "Cursed King", "Manipulator", "Solo Hunter", "Vampire King", "Cursed Vessel", "Yamato", "Strongest Shinobi"},
+    Value = {},
+    Callback = function(v) 
+        _G.TargetTimedBosses = v 
+    end,
+})
+
+TimedSection:Toggle({
+    Title = "Auto Hunt Timed Bosses",
+    Value = false,
+    Callback = function(state)
+        _G.AutoHuntTimed = state
+        if _G.ManageFollowSystem then
+            _G.ManageFollowSystem()
+        end
+    end,
+})
+
+
 SpawnerSection:Toggle({
     Title = "Auto Follow Behind Boss",
     Value = false,
     Callback = function(state)
         _G.AutoTween = state
-        local RunService = game:GetService("RunService")
-        local noclipConn
-        
-        if state then
-            -- 1. SAFE CORE-ONLY NOCLIP (Prevents "Bug Part" by NOT touching limbs)
-            noclipConn = RunService.Stepped:Connect(function()
-                if not _G.AutoTween then 
-                    if noclipConn then noclipConn:Disconnect() end 
-                    return 
-                end
-                pcall(function()
-                    local char = LocalPlayer.Character
-                    if char and char:FindFirstChild("HumanoidRootPart") then
-                        -- 1. PHYSICS STABILIZATION (Combat-Ready)
-                        local hrp = char.HumanoidRootPart
-                        local hum = char:FindFirstChildOfClass("Humanoid")
-                        
-                        -- DISABLE GRAVITY ONLY (Instead of Anchor)
-                        local bg = hrp:FindFirstChild("AntiGravity") or Instance.new("BodyVelocity")
-                        bg.Name = "AntiGravity"
-                        bg.MaxForce = Vector3.new(0, math.huge, 0)
-                        bg.Velocity = Vector3.new(0, 0.01, 0) -- Tiny drift for physics sync
-                        bg.Parent = hrp
-                        
-                        -- Allow Combat States
-                        if hum then
-                            hum.PlatformStand = false
-                            hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-                            hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-                        end
-                        
-                        -- Targeted Noclip
-                        for _, name in ipairs({"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso", "Head"}) do
-                            local p = char:FindFirstChild(name)
-                            if p and p:IsA("BasePart") then
-                                p.CanCollide = false
-                            end
-                        end
-                    end
-                end)
-            end)
-
-
-            -- 2. SMOOTH LINEAR GLIDE ENGINE
-            task.spawn(function()
-                while _G.AutoTween do
-                    local dt = RunService.Heartbeat:Wait()
-                    pcall(function()
-                        local targetName = _G.SelectedBoss
-                        local Boss = nil
-                        
-                        -- Search root and common folders
-                        for _, v in ipairs(workspace:GetChildren()) do
-                            if v:IsA("Model") and string.find(v.Name, targetName) and v:FindFirstChild("HumanoidRootPart") then
-                                Boss = v; break
-                            end
-                        end
-                        if not Boss then
-                            for _, folder in ipairs({"NPCs", "Enemies", "SummonedBosses"}) do
-                                local f = workspace:FindFirstChild(folder)
-                                if f then
-                                    for _, v in ipairs(f:GetChildren()) do
-                                        if v:IsA("Model") and string.find(v.Name, targetName) and v:FindFirstChild("HumanoidRootPart") then
-                                            Boss = v; break
-                                        end
-                                    end
-                                end
-                                if Boss then break end
-                            end
-                        end
-                        
-                        local Char = LocalPlayer.Character
-                        if Boss and Char and Char:FindFirstChild("HumanoidRootPart") then
-                            local bossHRP = Boss.HumanoidRootPart
-                            local myHRP = Char.HumanoidRootPart
-                            local targetCF = bossHRP.CFrame * CFrame.new(0, 0, _G.TweenDistanceValue)
-                            
-                            local dist = (myHRP.Position - targetCF.Position).Magnitude
-                            if dist > 1.5 then
-                                local speed = _G.TweenSpeedValue
-                                local moveDirection = (targetCF.Position - myHRP.Position).Unit
-                                local moveStep = moveDirection * speed * dt
-                                
-                                if moveStep.Magnitude >= dist then
-                                    myHRP.CFrame = targetCF
-                                else
-                                    myHRP.CFrame = myHRP.CFrame + moveStep
-                                    -- Look at boss (Flat rotation)
-                                    myHRP.CFrame = CFrame.new(myHRP.Position, Vector3.new(bossHRP.Position.X, myHRP.Position.Y, bossHRP.Position.Z))
-                                end
-                            end
-                        end
-                    end)
-                end
-            end)
-        else
-            -- 3. CLEANUP (Restore Character state on Toggle OFF)
-            if noclipConn then noclipConn:Disconnect() end
-            pcall(function()
-                local char = LocalPlayer.Character
-                if char then
-                    local hum = char:FindFirstChild("Humanoid")
-                    local hrp = char:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        hrp.Anchored = false
-                        local bg = hrp:FindFirstChild("AntiGravity")
-                        if bg then bg:Destroy() end
-                    end
-                    if hum then 
-                        hum.PlatformStand = false
-                        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-                        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-                        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-                    end
-                    -- Only restore collision for core parts
-                    for _, name in ipairs({"HumanoidRootPart", "Torso", "UpperTorso", "LowerTorso", "Head"}) do
-                        local p = char:FindFirstChild(name)
-                        if p and p:IsA("BasePart") then
-                            p.CanCollide = true
-                        end
-                    end
-                end
-            end)
+        if _G.ManageFollowSystem then
+            _G.ManageFollowSystem()
         end
     end,
 })
+
 
 
 
@@ -360,6 +526,20 @@ local function ListenToResults()
     end
 end
 task.spawn(ListenToResults)
+
+-- */ WORLD BOSS SYNC LISTENER /* --
+local function ListenToTimedBosses()
+    local Remote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("BossTimerSync")
+    if Remote then
+        Remote.OnClientEvent:Connect(function(data)
+            if type(data) == "table" then
+                _G.TimedBossesData = data
+            end
+        end)
+    end
+end
+task.spawn(ListenToTimedBosses)
+
 
 -- */ INITIALIZATION /* --
 task.spawn(function()
